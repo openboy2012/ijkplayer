@@ -89,6 +89,7 @@
         [options setPlayerOptionIntValue:0              forKey:@"find_stream_info"];
         [options setFormatOptionValue:self.manifest     forKey:@"manifest_string"];
     }
+    [options setFormatOptionIntValue:1 forKey:@"analyzeduration"];
     self.player = [[IJKFFMoviePlayerController alloc] initWithContentURL:self.url withOptions:options];
     self.player.view.autoresizingMask = UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
     self.player.view.frame = self.view.bounds;

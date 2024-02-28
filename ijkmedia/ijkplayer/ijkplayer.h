@@ -197,7 +197,7 @@ void            ijkmp_dec_ref(IjkMediaPlayer *mp);
 void            ijkmp_dec_ref_p(IjkMediaPlayer **pmp);
 
 int             ijkmp_set_data_source(IjkMediaPlayer *mp, const char *url);
-int             ijkmp_prepare_async(IjkMediaPlayer *mp);
+int             ijkmp_prepare_async(IjkMediaPlayer *mp, uint8_t *bytes, int length);
 int             ijkmp_start(IjkMediaPlayer *mp);
 int             ijkmp_pause(IjkMediaPlayer *mp);
 int             ijkmp_stop(IjkMediaPlayer *mp);
@@ -217,5 +217,9 @@ void           *ijkmp_set_weak_thiz(IjkMediaPlayer *mp, void *weak_thiz);
 /* need to call msg_free_res for freeing the resouce obtained in msg */
 int             ijkmp_get_msg(IjkMediaPlayer *mp, AVMessage *msg, int block);
 void            ijkmp_set_frame_at_time(IjkMediaPlayer *mp, const char *path, int64_t start_time, int64_t end_time, int num, int definition);
+
+void            ijkmp_input_stream(IjkMediaPlayer *mp, char *bytes, int lenght);
+void            ijkmp_master_clock(IjkMediaPlayer *mp, int clock);
+void            ijkmp_use_buffer_queue(IjkMediaPlayer *mp, int use);
 
 #endif

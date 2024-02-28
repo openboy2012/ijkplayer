@@ -114,6 +114,11 @@ void ijkmp_change_state_l(IjkMediaPlayer *mp, int new_state)
     ffp_notify_msg1(mp->ffplayer, FFP_MSG_PLAYBACK_STATE_CHANGED);
 }
 
+void ijkmp_input_stream(IjkMediaPlayer *mp, char *bytes, int length)
+{
+    ffp_input_stream(mp->ffplayer, bytes, length);
+}
+
 IjkMediaPlayer *ijkmp_create(int (*msg_loop)(void*))
 {
     IjkMediaPlayer *mp = (IjkMediaPlayer *) mallocz(sizeof(IjkMediaPlayer));
@@ -383,7 +388,7 @@ static int ijkmp_msg_loop(void *arg)
     return ret;
 }
 
-static int ijkmp_prepare_async_l(IjkMediaPlayer *mp)
+static int ijkmp_prepare_async_l(IjkMediaPlayer *mp, uint8_t *bytes, int length)
 {
     assert(mp);
 
@@ -403,6 +408,12 @@ static int ijkmp_prepare_async_l(IjkMediaPlayer *mp)
     ijkmp_change_state_l(mp, MP_STATE_ASYNC_PREPARING);
 
     msg_queue_start(&mp->ffplayer->msg_queue);
+    
+    ///如果有流头数据,设置成buffer队列模式
+    if (length > 0)
+    {
+        ffp_use_buffer_queue(mp->ffplayer, 1);
+    }
 
     // released in msg_loop
     ijkmp_inc_ref(mp);
@@ -410,7 +421,7 @@ static int ijkmp_prepare_async_l(IjkMediaPlayer *mp)
     // msg_thread is detached inside msg_loop
     // TODO: 9 release weak_thiz if pthread_create() failed;
 
-    int retval = ffp_prepare_async_l(mp->ffplayer, mp->data_source);
+    int retval = ffp_prepare_async_l(mp->ffplayer, mp->data_source, bytes, length);
     if (retval < 0) {
         ijkmp_change_state_l(mp, MP_STATE_ERROR);
         return retval;
@@ -419,12 +430,12 @@ static int ijkmp_prepare_async_l(IjkMediaPlayer *mp)
     return 0;
 }
 
-int ijkmp_prepare_async(IjkMediaPlayer *mp)
+int ijkmp_prepare_async(IjkMediaPlayer *mp, uint8_t *bytes, int length)
 {
     assert(mp);
     MPTRACE("ijkmp_prepare_async()\n");
     pthread_mutex_lock(&mp->mutex);
-    int retval = ijkmp_prepare_async_l(mp);
+    int retval = ijkmp_prepare_async_l(mp, bytes, length);
     pthread_mutex_unlock(&mp->mutex);
     MPTRACE("ijkmp_prepare_async()=%d\n", retval);
     return retval;
@@ -674,6 +685,16 @@ int ijkmp_get_loop(IjkMediaPlayer *mp)
 void *ijkmp_get_weak_thiz(IjkMediaPlayer *mp)
 {
     return mp->weak_thiz;
+}
+
+void ijkmp_master_clock(IjkMediaPlayer *mp, int clock)
+{
+    ffp_set_master_clock_type(mp->ffplayer, clock);
+}
+
+void ijkmp_use_buffer_queue(IjkMediaPlayer *mp, int use)
+{
+    ffp_use_buffer_queue(mp->ffplayer, use);
 }
 
 void *ijkmp_set_weak_thiz(IjkMediaPlayer *mp, void *weak_thiz)

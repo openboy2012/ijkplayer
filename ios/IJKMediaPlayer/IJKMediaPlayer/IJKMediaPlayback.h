@@ -68,6 +68,8 @@ typedef NS_ENUM(NSInteger, IJKMPMovieTimeOption) {
 @protocol IJKMediaPlayback <NSObject>
 
 - (void)prepareToPlay;
+///添加初始化接口
+- (void)prepareToPlay:(NSData *)data;
 - (void)play;
 - (void)pause;
 - (void)stop;

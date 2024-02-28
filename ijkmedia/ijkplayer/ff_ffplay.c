@@ -78,6 +78,8 @@
 #include "ijksoundtouch/ijksoundtouch_wrap.h"
 #endif
 
+//#include "uuIjkCommon.hpp"
+
 #ifndef AV_CODEC_FLAG2_FAST
 #define AV_CODEC_FLAG2_FAST CODEC_FLAG2_FAST
 #endif
@@ -140,6 +142,16 @@ int64_t get_valid_channel_layout(int64_t channel_layout, int channels)
 
 static void free_picture(Frame *vp);
 
+static void uu_buffer_create()
+{
+    
+}
+
+static void uu_buffer_free()
+{
+    
+}
+
 static int packet_queue_put_private(PacketQueue *q, AVPacket *pkt)
 {
     MyAVPacketList *pkt1;
@@ -182,10 +194,172 @@ static int packet_queue_put_private(PacketQueue *q, AVPacket *pkt)
     q->size += pkt1->pkt.size + sizeof(*pkt1);
 
     q->duration += FFMAX(pkt1->pkt.duration, MIN_PKT_DURATION);
-
     /* XXX: should duplicate packet data in DV case */
     SDL_CondSignal(q->cond);
+    
+    printf("[sishi] <%s>queue duration is %ld - %d (%ld) \n", q->queue_name, q->duration, q->size, q->nb_packets);
+
     return 0;
+}
+
+/// 设置视频缓冲区最大延迟，抖动时长，倍速播放速度
+void ffp_set_maxdelay_jitter_playrate(FFPlayer *ffp, int max_delay_ms, int network_jitter_ms, float new_play_rate)
+{
+    assert(ffp);
+    VideoState *is = ffp->is;
+    if (!is)
+        return;
+    
+    is->max_delay_ms = max_delay_ms;
+    is->network_jitter_ms = network_jitter_ms;
+    is->new_play_rate = new_play_rate;
+}
+
+///获取管道里已经解码的帧时长
+static int64_t get_video_queue_cached_duration(FFPlayer *ffp)
+{
+    VideoState *is = ffp->is;
+    return is->videoq.duration;
+}
+
+static int64_t get_audio_queue_cached_duration(FFPlayer *ffp)
+{
+    VideoState *is = ffp->is;
+    return is->audioq.duration;
+}
+
+// 控制视频缓冲区最大延迟在 [max_delay_ms, max_delay_ms+network_jitter_ms) 区间浮动
+// 设置max_delay_ms = 0 不开启追帧策略
+static void control_max_delay_duration(FFPlayer *ffp, int max_delay_ms, int network_jitter_ms, float new_play_rate)
+{
+    if (max_delay_ms == 0)
+        return;
+    
+    int64_t cached_duration = get_video_queue_cached_duration(ffp);
+    if (cached_duration > max_delay_ms + network_jitter_ms && ffp->pf_playback_rate == 1.0)
+    {
+        //设置倍速播放 建议1.1 or 1.2 倍速
+        ffp_set_playback_rate(ffp, new_play_rate);
+    }
+    else if(cached_duration <= max_delay_ms && ffp->pf_playback_rate != 1.0)
+    {
+        //恢复正常播放速度
+        ffp_set_playback_rate(ffp, 1.0);
+    }
+    else
+    {
+        // do nothing...
+    }
+}
+
+static int buffer_queue_init(UUBufferQueue *queue, char *name)
+{
+    memset(queue, 0, sizeof(UUBufferQueue));
+    queue->mutex = SDL_CreateMutex();
+    if (!queue->mutex) {
+        av_log(NULL, AV_LOG_FATAL, "SDL_CreateMutex(): %s\n", SDL_GetError());
+        return AVERROR(ENOMEM);
+    }
+    queue->cond = SDL_CreateCond();
+    if (!queue->cond) {
+        av_log(NULL, AV_LOG_FATAL, "SDL_CreateCond(): %s\n", SDL_GetError());
+        return AVERROR(ENOMEM);
+    }
+    queue->abort_request = 1;
+    queue->queue_name = name;
+    return 0;
+}
+
+static void buffer_queue_start(UUBufferQueue *queue)
+{
+    SDL_LockMutex(queue->mutex);
+    queue->abort_request = 0;
+    SDL_UnlockMutex(queue->mutex);
+}
+
+static void buffer_queue_flush(UUBufferQueue *queue)
+{
+    UUBufferList *lst, *lst1;
+
+    SDL_LockMutex(queue->mutex);
+    for (lst = queue->first_lst; lst; lst = lst1) {
+        lst1 = lst->next;
+        av_free(&lst->buffer); ///释放内部的内存
+        av_free(lst);
+    }
+    queue->next_lst = NULL;
+    queue->first_lst = NULL;
+    queue->nb_buffers = 0;
+    queue->size = 0;
+    SDL_UnlockMutex(queue->mutex);
+}
+
+static void buffer_queue_destroy(UUBufferQueue *queue)
+{
+    buffer_queue_flush(queue);
+    SDL_DestroyMutex(queue->mutex);
+    SDL_DestroyCond(queue->cond);
+}
+
+static int buffer_queue_put(UUBufferQueue *queue, UUBuffer buffer)
+{
+    UUBufferList *list1;
+    
+    if (queue->abort_request)
+        return -1;
+
+    list1 = av_malloc(sizeof(UUBufferList));
+    if (!list1)
+        return -1;
+    list1->buffer = buffer;
+    list1->next = NULL;
+    list1->finished = 0;
+
+    if (!queue->next_lst)
+        queue->first_lst = list1;
+    else
+        queue->next_lst->next = list1;
+    queue->next_lst = list1;
+    queue->nb_buffers++;
+    queue->size += list1->buffer.size + sizeof(*list1);
+
+    SDL_CondSignal(queue->cond);
+    
+    printf("[sishi] <%s>queue buffer count is %d \n", queue->queue_name, queue->nb_buffers);
+    return 0;
+}
+
+static int buffer_queue_get(UUBufferQueue *queue, UUBuffer *buf)
+{
+    UUBufferList *list1;
+    int ret;
+
+    SDL_LockMutex(queue->mutex);
+
+    for (;;) {
+        if (queue->abort_request) {
+            ret = -1;
+            break;
+        }
+        ///取出first_list
+        list1 = queue->first_lst;
+        if (list1) {
+            queue->first_lst = list1->next; ///取出下一个
+            if (!queue->first_lst)
+                queue->next_lst = NULL;
+            queue->nb_buffers--; ///buff数量减少1
+            queue->size -= list1->buffer.size + sizeof(*list1); ///减少队列长度
+            *buf = list1->buffer; ///取出当前内存数据
+            queue->current_lst = list1; ///指向当前buf
+            av_freep(&list1);
+            ret = 1;
+            break;
+        } else {
+            SDL_CondWait(queue->cond, queue->mutex);
+        }
+    }
+    SDL_UnlockMutex(queue->mutex);
+    return ret;
 }
 
 static int packet_queue_put(PacketQueue *q, AVPacket *pkt)
@@ -213,7 +387,7 @@ static int packet_queue_put_nullpacket(PacketQueue *q, int stream_index)
 }
 
 /* packet queue handling */
-static int packet_queue_init(PacketQueue *q)
+static int packet_queue_init(PacketQueue *q, char *q_name)
 {
     memset(q, 0, sizeof(PacketQueue));
     q->mutex = SDL_CreateMutex();
@@ -227,6 +401,7 @@ static int packet_queue_init(PacketQueue *q)
         return AVERROR(ENOMEM);
     }
     q->abort_request = 1;
+    q->queue_name = q_name;
     return 0;
 }
 
@@ -330,6 +505,7 @@ static int packet_queue_get(PacketQueue *q, AVPacket *pkt, int block, int *seria
         }
     }
     SDL_UnlockMutex(q->mutex);
+//    printf("[sishi] queue pkt size is %ld \n", pkt->size);
     return ret;
 }
 
@@ -598,6 +774,7 @@ static int decoder_decode_frame(FFPlayer *ffp, Decoder *d, AVFrame *frame, AVSub
                                 d->next_pts = frame->pts + frame->nb_samples;
                                 d->next_pts_tb = tb;
                             }
+                            printf("[sishi] decode audio pts is %ld \n", frame->pts);
                         }
                         break;
                     default:
@@ -1280,7 +1457,8 @@ static double compute_target_delay(FFPlayer *ffp, double delay, VideoState *is)
     av_log(NULL, AV_LOG_TRACE, "video: delay=%0.3f A-V=%f\n",
             delay, -diff);
 #endif
-
+    
+    printf("[sishi] delay is %f diff is %f \n", delay, diff);
     return delay;
 }
 
@@ -2143,6 +2321,8 @@ static int audio_thread(void *arg)
 
                 av_frame_move_ref(af->frame, frame);
                 frame_queue_push(&is->sampq);
+                
+                printf("[sishi] audio duration is %f-(%lu) \n", af->duration, af->pos);
 
 #if CONFIG_AVFILTER
                 if (is->audioq.serial != is->auddec.pkt_serial)
@@ -2218,6 +2398,7 @@ static int ffplay_video_thread(void *arg)
         if (!ret)
             continue;
 
+        ///只获取frame 模式
         if (ffp->get_frame_mode) {
             if (!ffp->get_img_info || ffp->get_img_info->count <= 0) {
                 av_frame_unref(frame);
@@ -2315,7 +2496,23 @@ static int ffplay_video_thread(void *arg)
                 is->frame_last_filter_delay = 0;
             tb = av_buffersink_get_time_base(filt_out);
 #endif
+//            //获取缓存的packets,因为我们不需要缓存,这里加速播
+//            int64_t  video_cache_packets= ffp->stat.video_cache.packets;
+//            //每秒是30帧,有缓冲的时候,120 四倍的播放速率
+//            if(video_cache_packets>=2){
+//                frame_rate.num=120;
+//            }
+//            //没有缓存的时候，按正常29帧的速率来播放
+//            if(video_cache_packets==0){
+//                frame_rate.num=25;
+//            }
             duration = (frame_rate.num && frame_rate.den ? av_q2d((AVRational){frame_rate.den, frame_rate.num}) : 0);
+//            //超过5帧,1帧播放0.005秒
+//            if (video_cache_packets>=5)
+//            {
+//                duration=0.005;
+//            }
+            printf("[sishi] frame type is %d duration is %f \n", frame->pict_type, duration);
             pts = (frame->pts == AV_NOPTS_VALUE) ? NAN : frame->pts * av_q2d(tb);
             ret = queue_picture(ffp, frame, pts, duration, frame->pkt_pos, is->viddec.pkt_serial);
             av_frame_unref(frame);
@@ -3040,21 +3237,38 @@ static int stream_has_enough_packets(AVStream *st, int stream_id, PacketQueue *q
 #endif
            queue->nb_packets > min_frames;
 }
-
+    
 static int is_realtime(AVFormatContext *s)
 {
-    if(   !strcmp(s->iformat->name, "rtp")
-       || !strcmp(s->iformat->name, "rtsp")
-       || !strcmp(s->iformat->name, "sdp")
+    if (!strcmp(s->iformat->name, "rtp") ||
+        !strcmp(s->iformat->name, "sdp") ||
+        !strcmp(s->iformat->name, "rtsp")
     )
         return 1;
 
-    if(s->pb && (   !strncmp(s->filename, "rtp:", 4)
-                 || !strncmp(s->filename, "udp:", 4)
-                )
+    if (s->pb && (!strncmp(s->filename, "rtp:", 4) ||
+                  !strncmp(s->filename, "udp:", 4) )
     )
         return 1;
     return 0;
+}
+
+static UUBuffer gBuf;
+    
+static int read_packet(void *opaque, uint8_t *buf, int buf_size)
+{
+    UUBufferQueue *queue = (UUBufferQueue *)opaque;
+    UUBuffer qBuf;
+    buffer_queue_get(queue, &qBuf);
+    int size = FFMIN(qBuf.size, buf_size);
+    memcpy(buf, qBuf.data, size);
+    return size;
+}
+
+static int64_t seek_packet(void *opaque, int64_t offset, int whence)
+{
+    printf("[sishi] seek_packet %lld(%d) \n", offset, whence);
+    return 1;
 }
 
 /* this thread gets the stream from the disk or the network */
@@ -3063,6 +3277,7 @@ static int read_thread(void *arg)
     FFPlayer *ffp = arg;
     VideoState *is = ffp->is;
     AVFormatContext *ic = NULL;
+    AVIOContext *avio_cxt = NULL;
     int err, i, ret __unused;
     int st_index[AVMEDIA_TYPE_NB];
     AVPacket pkt1, *pkt = &pkt1;
@@ -3119,7 +3334,21 @@ static int read_thread(void *arg)
 
     av_dict_set_intptr(&ffp->format_opts, "video_cache_ptr", (intptr_t)&ffp->stat.video_cache, 0);
     av_dict_set_intptr(&ffp->format_opts, "audio_cache_ptr", (intptr_t)&ffp->stat.audio_cache, 0);
-    err = avformat_open_input(&ic, is->filename, is->iformat, &ffp->format_opts);
+    
+    if (ffp->use_buffer_queue == 0) {
+        ///这个接口同步且耗时
+        err = avformat_open_input(&ic, is->filename, is->iformat, &ffp->format_opts);
+    }
+    else
+    {
+        uint8_t *avio_ctx_buffer = NULL;
+        int avio_ctx_buffer_size = 32768;
+        avio_ctx_buffer = av_malloc(avio_ctx_buffer_size);
+        avio_cxt = avio_alloc_context(avio_ctx_buffer, avio_ctx_buffer_size, 0, &ffp->bufferQueue, &read_packet, NULL, &seek_packet);
+        ic->pb = avio_cxt;
+        err = avformat_open_input(&ic, NULL, av_find_input_format("flv"), &ffp->format_opts);
+    }
+    
     if (err < 0) {
         print_error(is->filename, err);
         ret = -1;
@@ -3143,7 +3372,10 @@ static int read_thread(void *arg)
         ic->flags |= AVFMT_FLAG_GENPTS;
 
     av_format_inject_global_side_data(ic);
-    //
+    
+    ///设置网络抖动参数
+    ffp_set_maxdelay_jitter_playrate(ffp, 200, 200, 3.0f);
+    
     //AVDictionary **opts;
     //int orig_nb_streams;
     //opts = setup_find_stream_info_opts(ic, ffp->codec_opts);
@@ -3188,7 +3420,6 @@ static int read_thread(void *arg)
         ffp->seek_by_bytes = !!(ic->iformat->flags & AVFMT_TS_DISCONT) && strcmp("ogg", ic->iformat->name);
 
     is->max_frame_duration = (ic->iformat->flags & AVFMT_TS_DISCONT) ? 10.0 : 3600.0;
-    is->max_frame_duration = 10.0;
     av_log(ffp, AV_LOG_INFO, "max_frame_duration: %.3f\n", is->max_frame_duration);
 
 #ifdef FFP_MERGE
@@ -3243,23 +3474,11 @@ static int read_thread(void *arg)
         av_log(NULL, AV_LOG_WARNING, "multiple video stream found, prefer first h264 stream: %d\n", first_h264_stream);
     }
     if (!ffp->video_disable)
-        st_index[AVMEDIA_TYPE_VIDEO] =
-            av_find_best_stream(ic, AVMEDIA_TYPE_VIDEO,
-                                st_index[AVMEDIA_TYPE_VIDEO], -1, NULL, 0);
+        st_index[AVMEDIA_TYPE_VIDEO] = av_find_best_stream(ic, AVMEDIA_TYPE_VIDEO, st_index[AVMEDIA_TYPE_VIDEO], -1, NULL, 0);
     if (!ffp->audio_disable)
-        st_index[AVMEDIA_TYPE_AUDIO] =
-            av_find_best_stream(ic, AVMEDIA_TYPE_AUDIO,
-                                st_index[AVMEDIA_TYPE_AUDIO],
-                                st_index[AVMEDIA_TYPE_VIDEO],
-                                NULL, 0);
+        st_index[AVMEDIA_TYPE_AUDIO] = av_find_best_stream(ic, AVMEDIA_TYPE_AUDIO, st_index[AVMEDIA_TYPE_AUDIO], st_index[AVMEDIA_TYPE_VIDEO], NULL, 0);
     if (!ffp->video_disable && !ffp->subtitle_disable)
-        st_index[AVMEDIA_TYPE_SUBTITLE] =
-            av_find_best_stream(ic, AVMEDIA_TYPE_SUBTITLE,
-                                st_index[AVMEDIA_TYPE_SUBTITLE],
-                                (st_index[AVMEDIA_TYPE_AUDIO] >= 0 ?
-                                 st_index[AVMEDIA_TYPE_AUDIO] :
-                                 st_index[AVMEDIA_TYPE_VIDEO]),
-                                NULL, 0);
+        st_index[AVMEDIA_TYPE_SUBTITLE] = av_find_best_stream(ic, AVMEDIA_TYPE_SUBTITLE, st_index[AVMEDIA_TYPE_SUBTITLE], (st_index[AVMEDIA_TYPE_AUDIO] >= 0 ? st_index[AVMEDIA_TYPE_AUDIO] : st_index[AVMEDIA_TYPE_VIDEO]), NULL, 0);
 
     is->show_mode = ffp->show_mode;
 #ifdef FFP_MERGE // bbc: dunno if we need this
@@ -3379,8 +3598,7 @@ static int read_thread(void *arg)
             ffp_notify_msg3(ffp, FFP_MSG_BUFFERING_UPDATE, 0, 0);
             ret = avformat_seek_file(is->ic, -1, seek_min, seek_target, seek_max, is->seek_flags);
             if (ret < 0) {
-                av_log(NULL, AV_LOG_ERROR,
-                       "%s: error while seeking\n", is->ic->filename);
+                av_log(NULL, AV_LOG_ERROR, "%s: error while seeking\n", is->ic->filename);
             } else {
                 if (is->audio_stream >= 0) {
                     packet_queue_flush(&is->audioq);
@@ -3581,6 +3799,11 @@ static int read_thread(void *arg)
             }
         }
 
+        ///实现追帧效果
+        if (is->max_delay_ms > 0)
+        {
+            control_max_delay_duration(ffp, is->max_delay_ms, is->network_jitter_ms, is->new_play_rate);
+        }
         /* check if packet is in play range specified by user, then queue, otherwise discard */
         stream_start_time = ic->streams[pkt->stream_index]->start_time;
         pkt_ts = pkt->pts == AV_NOPTS_VALUE ? pkt->dts : pkt->pts;
@@ -3602,8 +3825,10 @@ static int read_thread(void *arg)
 
         ffp_statistic_l(ffp);
 
-        if (ffp->ijkmeta_delay_init && !init_ijkmeta &&
-                (ffp->first_video_frame_rendered || !is->video_st) && (ffp->first_audio_frame_rendered || !is->audio_st)) {
+        if (ffp->ijkmeta_delay_init &&
+            !init_ijkmeta &&
+            (ffp->first_video_frame_rendered || !is->video_st) &&
+            (ffp->first_audio_frame_rendered || !is->audio_st)) {
             ijkmeta_set_avformat_context_l(ffp->meta, ic);
             init_ijkmeta = 1;
         }
@@ -3643,7 +3868,7 @@ static VideoState *stream_open(FFPlayer *ffp, const char *filename, AVInputForma
 {
     assert(!ffp->is);
     VideoState *is;
-
+            
     is = av_mallocz(sizeof(VideoState));
     if (!is)
         return NULL;
@@ -3667,9 +3892,9 @@ static VideoState *stream_open(FFPlayer *ffp, const char *filename, AVInputForma
     if (frame_queue_init(&is->sampq, &is->audioq, SAMPLE_QUEUE_SIZE, 1) < 0)
         goto fail;
 
-    if (packet_queue_init(&is->videoq) < 0 ||
-        packet_queue_init(&is->audioq) < 0 ||
-        packet_queue_init(&is->subtitleq) < 0)
+    if (packet_queue_init(&is->videoq, "v") < 0 ||
+        packet_queue_init(&is->audioq, "a") < 0 ||
+        packet_queue_init(&is->subtitleq, "e") < 0)
         goto fail;
 
     if (!(is->continue_read_thread = SDL_CreateCond())) {
@@ -3719,8 +3944,13 @@ static VideoState *stream_open(FFPlayer *ffp, const char *filename, AVInputForma
         goto fail;
     }
 
-    if (ffp->async_init_decoder && !ffp->video_disable && ffp->video_mime_type && strlen(ffp->video_mime_type) > 0
-                    && ffp->mediacodec_default_name && strlen(ffp->mediacodec_default_name) > 0) {
+    if (ffp->async_init_decoder && 
+        !ffp->video_disable &&
+        ffp->video_mime_type &&
+        strlen(ffp->video_mime_type) > 0 &&
+        ffp->mediacodec_default_name &&
+        strlen(ffp->mediacodec_default_name) > 0)
+    {
         if (ffp->mediacodec_all_videos || ffp->mediacodec_avc || ffp->mediacodec_hevc || ffp->mediacodec_mpeg2) {
             decoder_init(&is->viddec, NULL, &is->videoq, is->continue_read_thread);
             ffp->node_vdec = ffpipeline_init_video_decoder(ffp->pipeline, ffp);
@@ -3893,6 +4123,26 @@ void ffp_global_init()
 
     g_ffmpeg_global_inited = true;
 }
+            
+void ffp_input_stream(FFPlayer *ffp, char *bytes, size_t length)
+{
+    if (ffp->use_buffer_queue == 0)
+        return;
+    int left_size = (int)length;
+    ///超过32768字节就要分包存储，一个FLV IO限制长度32768
+    do {
+        int size = FFMIN(left_size, 32768);
+        ///初始化buffer结构体
+        UUBuffer *buf = av_malloc(sizeof(UUBuffer));
+        buf->data = av_malloc(size);
+        memcpy(buf->data, bytes, size);
+        buf->size = size;
+        buffer_queue_put(&ffp->bufferQueue, *buf);
+        bytes += size;
+        left_size -= size;
+    }
+    while(left_size > 0);
+}
 
 void ffp_global_uninit()
 {
@@ -3994,7 +4244,7 @@ FFPlayer *ffp_create()
     ffp_reset_internal(ffp);
     ffp->av_class = &ffp_context_class;
     ffp->meta = ijkmeta_create();
-
+            
     av_opt_set_defaults(ffp);
     return ffp;
 }
@@ -4021,7 +4271,11 @@ void ffp_destroy(FFPlayer *ffp)
     SDL_DestroyMutexP(&ffp->vf_mutex);
 
     msg_queue_destroy(&ffp->msg_queue);
-
+    
+    if (ffp->use_buffer_queue) {
+        ///释放数据流管道
+        buffer_queue_destroy(&ffp->bufferQueue);
+    }
 
     av_free(ffp);
 }
@@ -4257,7 +4511,7 @@ static void ffp_show_version_int(FFPlayer *ffp, const char *module, unsigned ver
            (unsigned int)IJKVERSION_GET_MICRO(version));
 }
 
-int ffp_prepare_async_l(FFPlayer *ffp, const char *file_name)
+int ffp_prepare_async_l(FFPlayer *ffp, const char *file_name, uint8_t *bytes, int length)
 {
     assert(ffp);
     assert(!ffp->is);
@@ -4309,6 +4563,14 @@ int ffp_prepare_async_l(FFPlayer *ffp, const char *file_name)
     }
 #endif
 
+    if (ffp->use_buffer_queue == 1) {
+        ///构造数据流管道
+        buffer_queue_init(&ffp->bufferQueue, "buf");
+        ///设置队列可被读取
+        buffer_queue_start(&ffp->bufferQueue);
+        ///塞入流头
+        ffp_input_stream(ffp, (char *)bytes, length);
+    }
     VideoState *is = stream_open(ffp, file_name, NULL);
     if (!is) {
         av_log(NULL, AV_LOG_WARNING, "ffp_prepare_async_l: stream_open failed OOM");
@@ -4504,7 +4766,7 @@ int ffp_get_loop(FFPlayer *ffp)
 
 int ffp_packet_queue_init(PacketQueue *q)
 {
-    return packet_queue_init(q);
+    return packet_queue_init(q, "");
 }
 
 void ffp_packet_queue_destroy(PacketQueue *q)
@@ -4700,6 +4962,7 @@ void ffp_check_buffering_l(FFPlayer *ffp)
             ffp->playable_duration_ms = buf_time_position;
 
             buf_time_percent = (int)av_rescale(cached_duration_in_ms, 1005, hwm_in_ms * 10);
+            printf("[sishi] buf_time percent is %d \n", buf_size_percent);
 #ifdef FFP_SHOW_DEMUX_CACHE
             av_log(ffp, AV_LOG_DEBUG, "time cache=%%%d (%d/%d)\n", buf_time_percent, cached_duration_in_ms, hwm_in_ms);
 #endif
@@ -4754,7 +5017,8 @@ void ffp_check_buffering_l(FFPlayer *ffp)
 
         ffp->dcc.current_high_water_mark_in_ms = hwm_in_ms;
 
-        if (is->buffer_indicator_queue && is->buffer_indicator_queue->nb_packets > 0) {
+        if (is->buffer_indicator_queue && is->buffer_indicator_queue->nb_packets > 0) 
+        {
             if (   (is->audioq.nb_packets >= MIN_MIN_FRAMES || is->audio_stream < 0 || is->audioq.abort_request)
                 && (is->videoq.nb_packets >= MIN_MIN_FRAMES || is->video_stream < 0 || is->videoq.abort_request)) {
                 ffp_toggle_buffering(ffp, 0);

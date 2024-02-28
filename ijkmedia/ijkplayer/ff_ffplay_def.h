@@ -165,8 +165,8 @@ typedef struct MyAVPacketList {
 
 typedef struct PacketQueue {
     MyAVPacketList *first_pkt, *last_pkt;
-    int nb_packets;
-    int size;
+    int nb_packets; ///队列中的包数量
+    int size; ///队列内存长度
     int64_t duration;
     int abort_request;
     int serial;
@@ -176,6 +176,7 @@ typedef struct PacketQueue {
     int recycle_count;
     int alloc_count;
 
+    char *queue_name;
     int is_buffer_indicator;
 } PacketQueue;
 
@@ -273,6 +274,11 @@ typedef struct Decoder {
 } Decoder;
 
 typedef struct VideoState {
+    
+    int max_delay_ms;       // 默认: 5000ms
+    int network_jitter_ms;  // 默认: 500ms
+    float new_play_rate;    // 默认: 1.2
+    
     SDL_Thread *read_tid;
     SDL_Thread _read_tid;
     AVInputFormat *iformat;
@@ -552,12 +558,43 @@ inline static void ffp_reset_demux_cache_control(FFDemuxCacheControl *dcc)
 /* ffplayer */
 struct IjkMediaMeta;
 struct IJKFF_Pipeline;
+
+typedef struct UUBuffer
+{
+    uint8_t *data; ///数据
+    int size; ///数据长度
+} UUBuffer;
+
+typedef struct UUBufferList {
+    UUBuffer buffer; ///当前buf
+    struct UUBufferList *next; ///下一个buf
+    int finished; ///是否读写完了
+} UUBufferList;
+
+typedef struct UUBufferQueue {
+    UUBufferList *first_lst, *next_lst;
+    int nb_buffers; ///队列中的包数量
+    int size; ///队列内存长度
+    int abort_request; ///队列是否有效
+    SDL_mutex *mutex; ///读写锁
+    SDL_cond *cond; ///条件
+    UUBufferList *current_lst; ///当前使用的buf
+    char *queue_name; ///队列名称
+} UUBufferQueue;
+
 typedef struct FFPlayer {
     const AVClass *av_class;
+    
+    ///数据队列
+//    PacketQueue bufq;
+    ///是否使用 数据队列
+    int use_buffer_queue;
+    ///Buffer队列
+    UUBufferQueue bufferQueue;
 
     /* ffplay context */
     VideoState *is;
-
+    
     /* format/codec options */
     AVDictionary *format_opts;
     AVDictionary *codec_opts;
@@ -853,6 +890,9 @@ inline static void ffp_reset_internal(FFPlayer *ffp)
     ffp->ijkio_inject_opaque = NULL;
     ffp_reset_statistic(&ffp->stat);
     ffp_reset_demux_cache_control(&ffp->dcc);
+    
+    ///默认使用url地址
+    ffp->use_buffer_queue = 0;
 }
 
 inline static void ffp_notify_msg1(FFPlayer *ffp, int what) {
@@ -873,6 +913,18 @@ inline static void ffp_notify_msg4(FFPlayer *ffp, int what, int arg1, int arg2, 
 
 inline static void ffp_remove_msg(FFPlayer *ffp, int what) {
     msg_queue_remove(&ffp->msg_queue, what);
+}
+
+///设置主时钟
+inline static void ffp_set_master_clock_type(FFPlayer *ffp, int master_type)
+{
+    ffp->av_sync_type = master_type;
+}
+
+///使用buffer 队列
+inline static void ffp_use_buffer_queue(FFPlayer *ffp, int use)
+{
+    ffp->use_buffer_queue = use;
 }
 
 inline static const char *ffp_get_error_string(int error) {

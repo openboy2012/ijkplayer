@@ -39,16 +39,16 @@ void      ffp_io_stat_complete_register(void (*cb)(const char *url,
                                                    int64_t read_bytes, int64_t total_size,
                                                    int64_t elpased_time, int64_t total_duration));
 
-FFPlayer *ffp_create();
+FFPlayer  *ffp_create();
 void      ffp_destroy(FFPlayer *ffp);
 void      ffp_destroy_p(FFPlayer **pffp);
 void      ffp_reset(FFPlayer *ffp);
 
 /* set options before ffp_prepare_async_l() */
 
-void     ffp_set_frame_at_time(FFPlayer *ffp, const char *path, int64_t start_time, int64_t end_time, int num, int definition);
-void     *ffp_set_inject_opaque(FFPlayer *ffp, void *opaque);
-void     *ffp_set_ijkio_inject_opaque(FFPlayer *ffp, void *opaque);
+void      ffp_set_frame_at_time(FFPlayer *ffp, const char *path, int64_t start_time, int64_t end_time, int num, int definition);
+void      *ffp_set_inject_opaque(FFPlayer *ffp, void *opaque);
+void      *ffp_set_ijkio_inject_opaque(FFPlayer *ffp, void *opaque);
 void      ffp_set_option(FFPlayer *ffp, int opt_category, const char *name, const char *value);
 void      ffp_set_option_int(FFPlayer *ffp, int opt_category, const char *name, int64_t value);
 void      ffp_set_option_intptr(FFPlayer *ffp, int opt_category, const char *name, uintptr_t value);
@@ -57,7 +57,7 @@ int       ffp_get_video_codec_info(FFPlayer *ffp, char **codec_info);
 int       ffp_get_audio_codec_info(FFPlayer *ffp, char **codec_info);
 
 /* playback controll */
-int       ffp_prepare_async_l(FFPlayer *ffp, const char *file_name);
+int       ffp_prepare_async_l(FFPlayer *ffp, const char *file_name, uint8_t *bytes, int length);
 int       ffp_start_from_l(FFPlayer *ffp, long msec);
 int       ffp_start_l(FFPlayer *ffp);
 int       ffp_pause_l(FFPlayer *ffp);
@@ -116,7 +116,11 @@ void      ffp_set_property_float(FFPlayer *ffp, int id, float value);
 int64_t   ffp_get_property_int64(FFPlayer *ffp, int id, int64_t default_value);
 void      ffp_set_property_int64(FFPlayer *ffp, int id, int64_t value);
 
+void      ffp_set_maxdelay_jitter_playrate(FFPlayer *ffp, int max_delay_ms, int network_jitter_ms, float new_play_rate);
+
 // must be freed with free();
-struct IjkMediaMeta *ffp_get_meta_l(FFPlayer *ffp);
+struct    IjkMediaMeta *ffp_get_meta_l(FFPlayer *ffp);
+
+void      ffp_input_stream(FFPlayer *ffp, char *bytes, size_t length);
 
 #endif
