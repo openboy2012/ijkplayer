@@ -1,4 +1,4 @@
-/*
+ /*
  * IJKFFMoviePlayerController.h
  *
  * Copyright (c) 2013 Bilibili
@@ -97,6 +97,13 @@ typedef enum IJKLogLevel {
 - (void)prepareToPlay;
 ///添加初始化接口
 - (void)prepareToPlay:(NSData *)data;
+
+///开始录制
+- (void)startRecord:(NSString *)filePath;
+///结束录制
+- (void)stopRecord;
+///获取当前截图
+- (UIImage *)capture;
 
 - (void)play;
 - (void)pause;

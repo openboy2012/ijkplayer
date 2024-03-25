@@ -255,14 +255,24 @@ LABEL_RETURN:
 }
 
 static void
-IjkMediaPlayer_prepareAsync(JNIEnv *env, jobject thiz)
+IjkMediaPlayer_prepareAsync(JNIEnv *env, jobject thiz,jobject byteBuffer, jint length)
 {
     MPTRACE("%s\n", __func__);
     int retval = 0;
     IjkMediaPlayer *mp = jni_get_media_player(env, thiz);
     JNI_CHECK_GOTO(mp, env, "java/lang/IllegalStateException", "mpjni: prepareAsync: null mp", LABEL_RETURN);
 
-    retval = ijkmp_prepare_async(mp);
+    // 将 java.nio.ByteBuffer 转换为 C 的 uint8_t 指针
+    void *buffer = (*env)->GetDirectBufferAddress(env, byteBuffer);
+    if (buffer == NULL) {
+        jclass exceptionClass = (*env)->FindClass(env, "java/lang/IllegalStateException");
+        if (exceptionClass != NULL) {
+            (*env)->ThrowNew(env, exceptionClass, "ByteBuffer is not a direct buffer");
+        }
+        return;
+    }
+
+    retval = ijkmp_prepare_async(mp,buffer,length);
     IJK_CHECK_MPRET_GOTO(retval, env, LABEL_RETURN);
 
 LABEL_RETURN:
@@ -1129,6 +1139,59 @@ LABEL_RETURN:
 
 
 
+static jint
+IjkMediaPlayer_startRecord(JNIEnv *env, jclass thiz,jstring file)
+{
+    jint retval = 0;
+    IjkMediaPlayer *mp = jni_get_media_player(env, thiz);
+    JNI_CHECK_GOTO(mp, env, NULL, "mpjni: startRecord: null mp", LABEL_RETURN);
+    const char *nativeString = (*env)->GetStringUTFChars(env, file, 0);
+    retval = ijkmp_start_record(mp,nativeString);
+
+    LABEL_RETURN:
+    ijkmp_dec_ref_p(&mp);
+    return retval;
+}
+
+static jint
+IjkMediaPlayer_stopRecord(JNIEnv *env, jclass thiz)
+{
+    jint retval = 0;
+    IjkMediaPlayer *mp = jni_get_media_player(env, thiz);
+    JNI_CHECK_GOTO(mp, env, NULL, "mpjni: stopRecord: null mp", LABEL_RETURN);
+
+    retval = ijkmp_stop_record(mp);
+
+    LABEL_RETURN:
+    ijkmp_dec_ref_p(&mp);
+    return retval;
+}
+static jint
+IjkMediaPlayer_isRecord(JNIEnv *env, jclass thiz)
+{
+    jint retval = 0;
+    IjkMediaPlayer *mp = jni_get_media_player(env, thiz);
+    JNI_CHECK_GOTO(mp, env, NULL, "mpjni: stopRecord: null mp", LABEL_RETURN);
+
+    retval = ijkmp_is_record(mp);
+
+    LABEL_RETURN:
+    ijkmp_dec_ref_p(&mp);
+    return retval;
+}
+
+static void
+IjkMediaPlayer_input_stream(JNIEnv *env, jclass thiz,jobject buffer, jint length) {
+
+    IjkMediaPlayer *mp = jni_get_media_player(env, thiz);
+
+    void *buf = (*env)->GetDirectBufferAddress(env, buffer);
+
+    ijkmp_input_stream(mp, buf, length);
+}
+
+
+
 
 
 // ----------------------------------------------------------------------------
@@ -1144,7 +1207,7 @@ static JNINativeMethod g_methods[] = {
     { "_setAndroidIOCallback",  "(Ltv/danmaku/ijk/media/player/misc/IAndroidIO;)V", (void *)IjkMediaPlayer_setAndroidIOCallback },
 
     { "_setVideoSurface",       "(Landroid/view/Surface;)V", (void *) IjkMediaPlayer_setVideoSurface },
-    { "_prepareAsync",          "()V",      (void *) IjkMediaPlayer_prepareAsync },
+    { "_prepareAsync",          "(Ljava/nio/ByteBuffer;I)V",      (void *) IjkMediaPlayer_prepareAsync },
     { "_start",                 "()V",      (void *) IjkMediaPlayer_start },
     { "_stop",                  "()V",      (void *) IjkMediaPlayer_stop },
     { "seekTo",                 "(J)V",     (void *) IjkMediaPlayer_seekTo },
@@ -1180,6 +1243,11 @@ static JNINativeMethod g_methods[] = {
 
     { "native_setLogLevel",     "(I)V",                     (void *) IjkMediaPlayer_native_setLogLevel },
     { "_setFrameAtTime",        "(Ljava/lang/String;JJII)V", (void *) IjkMediaPlayer_setFrameAtTime },
+    { "startRecord",            "(Ljava/lang/String;)I", (void *) IjkMediaPlayer_startRecord },
+    { "stopRecord",             "()I",      (void *) IjkMediaPlayer_stopRecord },
+    { "isRecord",             "()I",      (void *) IjkMediaPlayer_isRecord },
+    {"_inputStream","(Ljava/nio/ByteBuffer;I)V",(void *) IjkMediaPlayer_input_stream },
+
 };
 
 JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved)

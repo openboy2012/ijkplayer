@@ -121,6 +121,30 @@ void      ffp_set_maxdelay_jitter_playrate(FFPlayer *ffp, int max_delay_ms, int 
 // must be freed with free();
 struct    IjkMediaMeta *ffp_get_meta_l(FFPlayer *ffp);
 
+/*
+* 开始录制
+* @param file_name 保存录制文件的全路径，只需要文件路径就行，不需要提前生成文件
+*/
+int ffp_start_record(FFPlayer *ffp, const char *file_name);
+/*
+* 结束录制
+*/
+int ffp_stop_record(FFPlayer *ffp);
+/*
+* 把 packet 包写入文件中
+*/
+int ffp_record_file(FFPlayer *ffp, AVPacket *packet);
+
+/*
+* 判断是否在录制
+*
+*/
+int ffp_is_record(FFPlayer *ffp);
+
+
+///自定义IO数据输入接口
 void      ffp_input_stream(FFPlayer *ffp, char *bytes, size_t length);
+
+
 
 #endif

@@ -142,16 +142,6 @@ int64_t get_valid_channel_layout(int64_t channel_layout, int channels)
 
 static void free_picture(Frame *vp);
 
-static void uu_buffer_create()
-{
-    
-}
-
-static void uu_buffer_free()
-{
-    
-}
-
 static int packet_queue_put_private(PacketQueue *q, AVPacket *pkt)
 {
     MyAVPacketList *pkt1;
@@ -197,8 +187,7 @@ static int packet_queue_put_private(PacketQueue *q, AVPacket *pkt)
     /* XXX: should duplicate packet data in DV case */
     SDL_CondSignal(q->cond);
     
-    printf("[sishi] <%s>queue duration is %ld - %d (%ld) \n", q->queue_name, q->duration, q->size, q->nb_packets);
-
+    av_log(NULL, AV_LOG_DEBUG, "[sishi] <%s> queue duration is %lld - %d (%d) \n", q->queue_name, q->duration, q->size, q->nb_packets);
     return 0;
 }
 
@@ -252,6 +241,7 @@ static void control_max_delay_duration(FFPlayer *ffp, int max_delay_ms, int netw
     }
 }
 
+///初始化buffer队列
 static int buffer_queue_init(UUBufferQueue *queue, char *name)
 {
     memset(queue, 0, sizeof(UUBufferQueue));
@@ -270,6 +260,16 @@ static int buffer_queue_init(UUBufferQueue *queue, char *name)
     return 0;
 }
 
+///停止队列
+static void buffer_queue_abort(UUBufferQueue *queue)
+{
+    SDL_LockMutex(queue->mutex);
+    queue->abort_request = 1;
+    SDL_CondSignal(queue->cond);
+    SDL_UnlockMutex(queue->mutex);
+}
+
+///启动队列
 static void buffer_queue_start(UUBufferQueue *queue)
 {
     SDL_LockMutex(queue->mutex);
@@ -277,6 +277,7 @@ static void buffer_queue_start(UUBufferQueue *queue)
     SDL_UnlockMutex(queue->mutex);
 }
 
+///释放队列中的数据
 static void buffer_queue_flush(UUBufferQueue *queue)
 {
     UUBufferList *lst, *lst1;
@@ -284,8 +285,9 @@ static void buffer_queue_flush(UUBufferQueue *queue)
     SDL_LockMutex(queue->mutex);
     for (lst = queue->first_lst; lst; lst = lst1) {
         lst1 = lst->next;
-        av_free(&lst->buffer); ///释放内部的内存
-        av_free(lst);
+        av_freep(&lst->buffer.data);
+        av_freep(&lst->buffer); ///释放内部的内存
+        av_freep(&lst);
     }
     queue->next_lst = NULL;
     queue->first_lst = NULL;
@@ -294,6 +296,7 @@ static void buffer_queue_flush(UUBufferQueue *queue)
     SDL_UnlockMutex(queue->mutex);
 }
 
+///释放队列
 static void buffer_queue_destroy(UUBufferQueue *queue)
 {
     buffer_queue_flush(queue);
@@ -301,7 +304,8 @@ static void buffer_queue_destroy(UUBufferQueue *queue)
     SDL_DestroyCond(queue->cond);
 }
 
-static int buffer_queue_put(UUBufferQueue *queue, UUBuffer buffer)
+///队列塞入数据
+static int buffer_queue_put(UUBufferQueue *queue, UUBuffer buffer, int releaseTag)
 {
     UUBufferList *list1;
     
@@ -313,7 +317,7 @@ static int buffer_queue_put(UUBufferQueue *queue, UUBuffer buffer)
         return -1;
     list1->buffer = buffer;
     list1->next = NULL;
-    list1->finished = 0;
+    list1->releaseFlag = releaseTag;
 
     if (!queue->next_lst)
         queue->first_lst = list1;
@@ -325,10 +329,10 @@ static int buffer_queue_put(UUBufferQueue *queue, UUBuffer buffer)
 
     SDL_CondSignal(queue->cond);
     
-    printf("[sishi] <%s>queue buffer count is %d \n", queue->queue_name, queue->nb_buffers);
     return 0;
 }
 
+///队列中获取数据
 static int buffer_queue_get(UUBufferQueue *queue, UUBuffer *buf)
 {
     UUBufferList *list1;
@@ -349,11 +353,22 @@ static int buffer_queue_get(UUBufferQueue *queue, UUBuffer *buf)
                 queue->next_lst = NULL;
             queue->nb_buffers--; ///buff数量减少1
             queue->size -= list1->buffer.size + sizeof(*list1); ///减少队列长度
-            *buf = list1->buffer; ///取出当前内存数据
-            queue->current_lst = list1; ///指向当前buf
-            av_freep(&list1);
-            ret = 1;
-            break;
+            ///非释放对象
+            if (list1->releaseFlag == 0) {
+                *buf = list1->buffer; ///取出当前内存数据
+                ///塞入到队列,进行异步释放过程
+                buffer_queue_put(queue, list1->buffer, 1);
+                ret = 1;
+                break;
+            }
+            else
+            {
+                ///真正释放指针地址
+                av_freep(&list1->buffer.data);
+                av_freep(&list1->buffer);
+                av_freep(&list1);
+                continue; ///继续取下一个数据
+            }
         } else {
             SDL_CondWait(queue->cond, queue->mutex);
         }
@@ -505,7 +520,6 @@ static int packet_queue_get(PacketQueue *q, AVPacket *pkt, int block, int *seria
         }
     }
     SDL_UnlockMutex(q->mutex);
-//    printf("[sishi] queue pkt size is %ld \n", pkt->size);
     return ret;
 }
 
@@ -746,7 +760,7 @@ static int decoder_decode_frame(FFPlayer *ffp, Decoder *d, AVFrame *frame, AVSub
         AVPacket pkt;
 
         if (d->queue->serial == d->pkt_serial) {
-            do {
+            do { 
                 if (d->queue->abort_request)
                     return -1;
 
@@ -774,7 +788,6 @@ static int decoder_decode_frame(FFPlayer *ffp, Decoder *d, AVFrame *frame, AVSub
                                 d->next_pts = frame->pts + frame->nb_samples;
                                 d->next_pts_tb = tb;
                             }
-                            printf("[sishi] decode audio pts is %ld \n", frame->pts);
                         }
                         break;
                     default:
@@ -821,7 +834,35 @@ static int decoder_decode_frame(FFPlayer *ffp, Decoder *d, AVFrame *frame, AVSub
                     ret = got_frame ? 0 : (pkt.data ? AVERROR(EAGAIN) : AVERROR_EOF);
                 }
             } else {
-                if (avcodec_send_packet(d->avctx, &pkt) == AVERROR(EAGAIN)) {
+                av_log(NULL, AV_LOG_DEBUG, "[sishi] avpacket stream-index(%d) key-frame is %d dts:%lld pts:%lld duration:%d\n", pkt.stream_index, pkt.flags, pkt.dts, pkt.pts, pkt.duration);
+                int result = avcodec_send_packet(d->avctx, &pkt);
+                
+                if (ffp->is_record) { // 可以录制时，写入文件
+                    //录制插入代码，开始
+                    // 获取开始录制前dts等于pts最后的值，这样录像第一帧的的显示时间和解码时间一致
+                    av_log(NULL, AV_LOG_DEBUG, "[sishi] record input stream-index(%d) key-frame is %d dts:%lld pts: %lld \n", pkt.stream_index, pkt.flags, pkt.dts, pkt.pts);
+                    ///视频帧I帧生成了,才开始录制
+                    if (!ffp->is_first && pkt.flags == 1 && pkt.stream_index == 1) {
+                        ffp->is_first = 1;
+                        // __android_log_print(ANDROID_LOG_DEBUG, "Debug_IJKPlayer_TIME", "pts==%ld_index%d",pkt.pts,pkt.stream_index);
+                    }
+
+                    if(ffp->is_first) {
+                        int64_t r_pts = pkt.pts - pkt.dts;
+                        pkt.pts = r_pts;
+                        pkt.dts = 0; ///清除流数据里返回的dts,这个数据不准确,所以需要清理掉
+                        if (0 != ffp_record_file(ffp, &pkt)) {
+                            ffp->record_error = 1;
+//                        J4A_ALOGE("意外停止录制");
+                            ffp_stop_record(ffp);
+                        }
+
+                    }
+
+
+                }
+
+                if (result == AVERROR(EAGAIN)) {
                     av_log(d->avctx, AV_LOG_ERROR, "Receive_frame and send_packet both returned EAGAIN, which is an API violation.\n");
                     d->packet_pending = 1;
                     av_packet_move_ref(&d->pkt, &pkt);
@@ -1458,7 +1499,6 @@ static double compute_target_delay(FFPlayer *ffp, double delay, VideoState *is)
             delay, -diff);
 #endif
     
-    printf("[sishi] delay is %f diff is %f \n", delay, diff);
     return delay;
 }
 
@@ -2322,7 +2362,7 @@ static int audio_thread(void *arg)
                 av_frame_move_ref(af->frame, frame);
                 frame_queue_push(&is->sampq);
                 
-                printf("[sishi] audio duration is %f-(%lu) \n", af->duration, af->pos);
+                av_log(NULL, AV_LOG_DEBUG, "[sishi] audio duration is %f-(%lld) \n", af->duration, af->pos);
 
 #if CONFIG_AVFILTER
                 if (is->audioq.serial != is->auddec.pkt_serial)
@@ -2512,7 +2552,7 @@ static int ffplay_video_thread(void *arg)
 //            {
 //                duration=0.005;
 //            }
-            printf("[sishi] frame type is %d duration is %f \n", frame->pict_type, duration);
+            
             pts = (frame->pts == AV_NOPTS_VALUE) ? NAN : frame->pts * av_q2d(tb);
             ret = queue_picture(ffp, frame, pts, duration, frame->pkt_pos, is->viddec.pkt_serial);
             av_frame_unref(frame);
@@ -3252,8 +3292,26 @@ static int is_realtime(AVFormatContext *s)
         return 1;
     return 0;
 }
-
-static UUBuffer gBuf;
+    
+void ffp_input_stream(FFPlayer *ffp, char *bytes, size_t length)
+{
+    if (ffp->use_buffer_queue == 0)
+        return;
+    int left_size = (int)length;
+    ///超过32768字节就要分包存储，一个FLV IO限制长度32768
+    do {
+        int size = FFMIN(left_size, 32768);
+        ///初始化buffer结构体
+        UUBuffer *buf = av_malloc(sizeof(UUBuffer));
+        buf->data = av_malloc(size);
+        memcpy(buf->data, bytes, size);
+        buf->size = size;
+        buffer_queue_put(&ffp->bufferQueue, *buf, 0);
+        bytes += size; ///地址偏移
+        left_size -= size;
+    }
+    while(left_size > 0);
+}
     
 static int read_packet(void *opaque, uint8_t *buf, int buf_size)
 {
@@ -3261,13 +3319,16 @@ static int read_packet(void *opaque, uint8_t *buf, int buf_size)
     UUBuffer qBuf;
     buffer_queue_get(queue, &qBuf);
     int size = FFMIN(qBuf.size, buf_size);
-    memcpy(buf, qBuf.data, size);
+    if (qBuf.data)
+    {
+        memcpy(buf, qBuf.data, size);
+    }
     return size;
 }
 
 static int64_t seek_packet(void *opaque, int64_t offset, int whence)
 {
-    printf("[sishi] seek_packet %lld(%d) \n", offset, whence);
+    av_log(NULL, AV_LOG_DEBUG, "[sishi] seek_packet %lld(%d) \n", offset, whence);
     return 1;
 }
 
@@ -3278,6 +3339,7 @@ static int read_thread(void *arg)
     VideoState *is = ffp->is;
     AVFormatContext *ic = NULL;
     AVIOContext *avio_cxt = NULL;
+    uint8_t *avio_ctx_buffer = NULL;
     int err, i, ret __unused;
     int st_index[AVMEDIA_TYPE_NB];
     AVPacket pkt1, *pkt = &pkt1;
@@ -3341,7 +3403,7 @@ static int read_thread(void *arg)
     }
     else
     {
-        uint8_t *avio_ctx_buffer = NULL;
+        ///这里使用一个IO读写大小的size
         int avio_ctx_buffer_size = 32768;
         avio_ctx_buffer = av_malloc(avio_ctx_buffer_size);
         avio_cxt = avio_alloc_context(avio_ctx_buffer, avio_ctx_buffer_size, 0, &ffp->bufferQueue, &read_packet, NULL, &seek_packet);
@@ -3567,7 +3629,13 @@ static int read_thread(void *arg)
 
     for (;;) {
         if (is->abort_request)
+        {
+            if (ffp->use_buffer_queue)
+            {
+                ic->pb = NULL;
+            }
             break;
+        }
 #ifdef FFP_MERGE
         if (is->paused != is->last_paused) {
             is->last_paused = is->paused;
@@ -3734,6 +3802,7 @@ static int read_thread(void *arg)
         }
         pkt->flags = 0;
         ret = av_read_frame(ic, pkt);
+        av_log(NULL, AV_LOG_DEBUG, "[sishi] read_frame pkt(index<%d>-k<%d>) dts:%lld pts:%lld duration:%lld\n",pkt->flags,pkt->stream_index,pkt->dts, pkt->pts, pkt->duration);
         if (ret < 0) {
             int pb_eof = 0;
             int pb_error = 0;
@@ -3852,6 +3921,8 @@ static int read_thread(void *arg)
 
     ret = 0;
  fail:
+    if (avio_ctx_buffer)
+        av_freep(&avio_ctx_buffer);
     if (ic && !is->ic)
         avformat_close_input(&ic);
 
@@ -3944,7 +4015,7 @@ static VideoState *stream_open(FFPlayer *ffp, const char *filename, AVInputForma
         goto fail;
     }
 
-    if (ffp->async_init_decoder && 
+    if (ffp->async_init_decoder &&
         !ffp->video_disable &&
         ffp->video_mime_type &&
         strlen(ffp->video_mime_type) > 0 &&
@@ -4123,26 +4194,6 @@ void ffp_global_init()
 
     g_ffmpeg_global_inited = true;
 }
-            
-void ffp_input_stream(FFPlayer *ffp, char *bytes, size_t length)
-{
-    if (ffp->use_buffer_queue == 0)
-        return;
-    int left_size = (int)length;
-    ///超过32768字节就要分包存储，一个FLV IO限制长度32768
-    do {
-        int size = FFMIN(left_size, 32768);
-        ///初始化buffer结构体
-        UUBuffer *buf = av_malloc(sizeof(UUBuffer));
-        buf->data = av_malloc(size);
-        memcpy(buf->data, bytes, size);
-        buf->size = size;
-        buffer_queue_put(&ffp->bufferQueue, *buf);
-        bytes += size;
-        left_size -= size;
-    }
-    while(left_size > 0);
-}
 
 void ffp_global_uninit()
 {
@@ -4259,6 +4310,11 @@ void ffp_destroy(FFPlayer *ffp)
         stream_close(ffp);
         ffp->is = NULL;
     }
+    
+    if (ffp->use_buffer_queue == 1) {
+        ///释放数据流管道
+        buffer_queue_destroy(&ffp->bufferQueue);
+    }
 
     SDL_VoutFreeP(&ffp->vout);
     SDL_AoutFreeP(&ffp->aout);
@@ -4271,11 +4327,6 @@ void ffp_destroy(FFPlayer *ffp)
     SDL_DestroyMutexP(&ffp->vf_mutex);
 
     msg_queue_destroy(&ffp->msg_queue);
-    
-    if (ffp->use_buffer_queue) {
-        ///释放数据流管道
-        buffer_queue_destroy(&ffp->bufferQueue);
-    }
 
     av_free(ffp);
 }
@@ -4630,6 +4681,10 @@ int ffp_is_paused_l(FFPlayer *ffp)
 int ffp_stop_l(FFPlayer *ffp)
 {
     assert(ffp);
+    if (ffp->use_buffer_queue == 1)
+    {
+        buffer_queue_abort(&ffp->bufferQueue);
+    }
     VideoState *is = ffp->is;
     if (is) {
         is->abort_request = 1;
@@ -4962,7 +5017,6 @@ void ffp_check_buffering_l(FFPlayer *ffp)
             ffp->playable_duration_ms = buf_time_position;
 
             buf_time_percent = (int)av_rescale(cached_duration_in_ms, 1005, hwm_in_ms * 10);
-            printf("[sishi] buf_time percent is %d \n", buf_size_percent);
 #ifdef FFP_SHOW_DEMUX_CACHE
             av_log(ffp, AV_LOG_DEBUG, "time cache=%%%d (%d/%d)\n", buf_time_percent, cached_duration_in_ms, hwm_in_ms);
 #endif
@@ -5017,7 +5071,7 @@ void ffp_check_buffering_l(FFPlayer *ffp)
 
         ffp->dcc.current_high_water_mark_in_ms = hwm_in_ms;
 
-        if (is->buffer_indicator_queue && is->buffer_indicator_queue->nb_packets > 0) 
+        if (is->buffer_indicator_queue && is->buffer_indicator_queue->nb_packets > 0)
         {
             if (   (is->audioq.nb_packets >= MIN_MIN_FRAMES || is->audio_stream < 0 || is->audioq.abort_request)
                 && (is->videoq.nb_packets >= MIN_MIN_FRAMES || is->video_stream < 0 || is->videoq.abort_request)) {
@@ -5305,6 +5359,251 @@ void ffp_set_property_int64(FFPlayer *ffp, int id, int64_t value)
     }
 }
 
+//开始录制函数:file_name是保存路径
+int ffp_start_record(FFPlayer *ffp, const char *file_name)
+{
+    assert(ffp);
+    VideoState *is = ffp->is;
+    int ret;
+
+    ffp->m_ofmt_ctx = NULL;
+    ffp->m_ofmt = NULL;
+    ffp->is_record = 0;
+    ffp->record_error = 0;
+
+    ffp->videoindex = -1;
+    ffp->audioindex = -1;
+    ffp->videoindex_out = -1;//视频输出流的下标
+    ffp->audioindex_out = -1;//音频输出流的下标
+
+    if (!file_name || !strlen(file_name)) { // 没有路径
+        goto end;
+    }
+
+    if (!is || !is->ic|| is->paused || is->abort_request) { // 没有上下文，或者上下文已经停止
+        goto end;
+    }
+
+    if (ffp->is_record) { // 已经在录制
+        goto end;
+    }
+
+    for (int i = 0; i < is->ic->nb_streams; i++) {
+        AVStream* av_stream = is->ic->streams[i];
+        enum AVMediaType mediaType = av_stream->codecpar->codec_type;
+
+        if (mediaType == AVMEDIA_TYPE_VIDEO) 
+        {
+            ffp->videoindex = i;
+        }
+        else if (mediaType == AVMEDIA_TYPE_AUDIO)
+        {
+            ffp->audioindex = i;
+        }
+        else
+        {
+            continue;
+        }
+    }
+
+    // 初始化一个用于输出的AVFormatContext结构体
+    avformat_alloc_output_context2(&ffp->m_ofmt_ctx, NULL, NULL, file_name);
+    if (!ffp->m_ofmt_ctx) {
+        av_log(ffp, AV_LOG_ERROR, "Could not create output context filename is %s\n", file_name);
+        goto end;
+    }
+    ffp->m_ofmt = ffp->m_ofmt_ctx->oformat;
+
+    for (int i = 0; i < is->ic->nb_streams; i++) {
+        if (i == ffp->videoindex ||
+            i == ffp->audioindex )
+        {
+            AVStream *in_stream = is->ic->streams[i];
+            AVCodecParameters *codecpar = in_stream->codecpar;
+
+            //查找正确的解码器
+            AVCodec *dec = avcodec_find_decoder(codecpar->codec_id);
+            AVStream *out_stream = avformat_new_stream(ffp->m_ofmt_ctx, dec);
+            if (!out_stream) {
+                // __android_log_print(ANDROID_LOG_DEBUG, "Debug_IJKPlayer", "Failed allocating output stream\n");
+                ret = AVERROR_UNKNOWN;
+                goto end;
+            }
+            if (i == ffp->videoindex) {
+                ffp->videoindex_out = out_stream->index;
+                // __android_log_print(ANDROID_LOG_DEBUG, "Debug_IJKPlayer_record", "视频流videoindex= %d\n", ffp->videoindex_out);
+            }
+            else if (i == ffp->audioindex)
+            {
+                ffp->audioindex_out = out_stream->index;
+                // __android_log_print(ANDROID_LOG_DEBUG, "Debug_IJKPlayer_record", "音频流audeoindex= %d\n", ffp->audioindex_out);
+            }
+            else
+            {
+
+            }
+            
+            ///兼容iOS的h265 codec_tag信息，iOS必须使用hvc1 Tag
+            if (codecpar->codec_type == AVMEDIA_TYPE_VIDEO)
+            {
+                codecpar->codec_tag = MKTAG('h', 'v', 'c', '1');
+            }
+            //为找到的解码器分配一个新的上下文
+            AVCodecContext *context = avcodec_alloc_context3(dec);
+            //加载编解码器参数  使用 avcodec_parameters_to_context 将编解码器参数从 AVCodecParameters 结构体复制到 AVCodecContext
+            ret = avcodec_parameters_to_context(context, codecpar);
+            out_stream->codec = context;//为输出流设置编解码器的上下文
+        }else{
+            continue;
+        }
+    }
+            
+    // 打开输出文件
+    if (!(ffp->m_ofmt->flags & AVFMT_NOFILE)) {
+        if (avio_open(&ffp->m_ofmt_ctx->pb, file_name, AVIO_FLAG_WRITE) < 0) {
+            av_log(ffp, AV_LOG_ERROR, "Could not open output file '%s'", file_name);
+            goto end;
+        }
+    }
+
+    // 写视频文件头
+    if (avformat_write_header(ffp->m_ofmt_ctx, NULL) < 0) {
+        av_log(ffp, AV_LOG_ERROR, "Error occurred when opening output file\n");
+        goto end;
+    }
+
+    ffp->is_record = 1;
+    ffp->index = 0; ///计数开始
+    ffp->record_error = 0;
+    pthread_mutex_init(&ffp->record_mutex, NULL);
+
+    return 0;
+    end:
+    ffp->record_error = 1;
+    return -1;
+}
+
+
+//停止录播
+int ffp_stop_record(FFPlayer *ffp)
+{
+    assert(ffp);
+    if (ffp->is_record) {
+        ffp->is_record = 0;
+        pthread_mutex_lock(&ffp->record_mutex);
+        if (ffp->m_ofmt_ctx != NULL) {
+            av_write_trailer(ffp->m_ofmt_ctx);
+            if (ffp->m_ofmt_ctx && !(ffp->m_ofmt->flags & AVFMT_NOFILE)) {
+                avio_close(ffp->m_ofmt_ctx->pb);
+            }
+            avformat_free_context(ffp->m_ofmt_ctx);
+            ffp->m_ofmt_ctx = NULL;
+            ffp->is_first = 0;
+            ffp->record_count = 0;
+
+
+            ffp->videoindex = -1;
+            ffp->audioindex = -1;
+            ffp->videoindex_out = -1;
+            ffp->audioindex_out = -1;
+            
+            ffp->index = 0; ///索引清零
+        }
+        pthread_mutex_unlock(&ffp->record_mutex);
+        pthread_mutex_destroy(&ffp->record_mutex);
+        av_log(ffp, AV_LOG_DEBUG, "stopRecord ok\n");
+    }
+    else {
+        av_log(ffp, AV_LOG_ERROR, "don't need stopRecord\n");
+    }
+    return 0;
+}
+
+
+int ffp_record_file(FFPlayer *ffp, AVPacket *packet)
+{
+    assert(ffp);
+    VideoState* is = ffp->is;
+    int ret = 0;
+    int stream_index = 0;
+    AVStream *in_stream;
+    AVStream *out_stream;
+
+    int pkt_index = packet->stream_index;//取出当前包的流索引
+
+    if (pkt_index == ffp->videoindex ||
+        pkt_index == ffp->audioindex)
+    {
+        if (ffp->is_record) {
+            if (packet == NULL) {
+                ffp->record_error = 1;
+                av_log(ffp, AV_LOG_ERROR, "packet == NULL");
+                return -1;
+            }
+
+            AVPacket *pkt = (AVPacket*)av_malloc(sizeof(AVPacket)); // 与看直播的 AVPacket分开，不然卡屏
+            av_new_packet(pkt, 0);
+
+            if (0 == av_packet_ref(pkt, packet)) 
+            {
+                pthread_mutex_lock(&ffp->record_mutex);
+                ///以视频帧数据为准
+                if (pkt->stream_index == 1)
+                {
+                    pkt->dts = ffp->index++ * pkt->duration;
+                    pkt->pts = pkt->dts;
+                    ffp->last_pts = pkt->dts;
+                }
+                else
+                {
+                    ///音频帧跟视频帧必须要有偏移,否帧会出现写入失败的错误
+                    pkt->dts = ffp->last_pts + 1;
+                    pkt->pts = pkt->dts;
+                    ffp->last_pts = pkt->dts;
+                }
+
+                in_stream = is->ic->streams[pkt->stream_index];
+
+                if (pkt->stream_index == ffp->videoindex) {
+                    out_stream = ffp->m_ofmt_ctx->streams[ffp->videoindex_out];
+                    stream_index = ffp->videoindex_out;
+                }
+                else {
+                    out_stream = ffp->m_ofmt_ctx->streams[ffp->audioindex_out];
+                    stream_index = ffp->audioindex_out;
+                }
+
+                // 转换PTS/DTS
+                pkt->pts = av_rescale_q_rnd(pkt->pts, in_stream->time_base, out_stream->time_base, (AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX));
+                pkt->dts = av_rescale_q_rnd(pkt->dts, in_stream->time_base, out_stream->time_base, (AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX));
+                pkt->duration = av_rescale_q(pkt->duration, in_stream->time_base, out_stream->time_base);
+                pkt->pos = -1;
+                pkt->stream_index = stream_index;
+
+                ffp->record_count++;
+
+                // 写入一个AVPacket到输出文件
+                if ((ret = av_interleaved_write_frame(ffp->m_ofmt_ctx, pkt)) < 0) {
+                    av_log(ffp, AV_LOG_ERROR, "Error muxing packet\n");
+                }
+
+                av_packet_unref(pkt);
+                pthread_mutex_unlock(&ffp->record_mutex);
+            }
+            else {
+                av_log(ffp, AV_LOG_ERROR, "av_packet_ref == NULL");
+            }
+        }
+    }
+    return ret;
+}
+
+//是否正在录制
+int ffp_is_record(FFPlayer *ffp)
+{
+    return ffp->is_record;
+}
+
 IjkMediaMeta *ffp_get_meta_l(FFPlayer *ffp)
 {
     if (!ffp)
@@ -5312,3 +5611,5 @@ IjkMediaMeta *ffp_get_meta_l(FFPlayer *ffp)
 
     return ffp->meta;
 }
+
+

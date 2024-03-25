@@ -222,4 +222,10 @@ void            ijkmp_input_stream(IjkMediaPlayer *mp, char *bytes, int lenght);
 void            ijkmp_master_clock(IjkMediaPlayer *mp, int clock);
 void            ijkmp_use_buffer_queue(IjkMediaPlayer *mp, int use);
 
+int ijkmp_start_record(IjkMediaPlayer *mp,const char *file_name);
+
+int ijkmp_stop_record(IjkMediaPlayer *mp);
+
+int ijkmp_is_record(IjkMediaPlayer *mp);
+
 #endif

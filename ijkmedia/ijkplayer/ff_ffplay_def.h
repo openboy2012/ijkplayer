@@ -178,6 +178,7 @@ typedef struct PacketQueue {
 
     char *queue_name;
     int is_buffer_indicator;
+    
 } PacketQueue;
 
 // #define VIDEO_PICTURE_QUEUE_SIZE 3
@@ -568,7 +569,7 @@ typedef struct UUBuffer
 typedef struct UUBufferList {
     UUBuffer buffer; ///当前buf
     struct UUBufferList *next; ///下一个buf
-    int finished; ///是否读写完了
+    int releaseFlag; ///是否是释放对象
 } UUBufferList;
 
 typedef struct UUBufferQueue {
@@ -578,15 +579,12 @@ typedef struct UUBufferQueue {
     int abort_request; ///队列是否有效
     SDL_mutex *mutex; ///读写锁
     SDL_cond *cond; ///条件
-    UUBufferList *current_lst; ///当前使用的buf
     char *queue_name; ///队列名称
 } UUBufferQueue;
 
 typedef struct FFPlayer {
     const AVClass *av_class;
     
-    ///数据队列
-//    PacketQueue bufq;
     ///是否使用 数据队列
     int use_buffer_queue;
     ///Buffer队列
@@ -602,6 +600,25 @@ typedef struct FFPlayer {
     AVDictionary *player_opts;
     AVDictionary *swr_opts;
     AVDictionary *swr_preset_opts;
+
+    AVFormatContext *m_ofmt_ctx;        // 用于输出的AVFormatContext结构体
+    AVOutputFormat *m_ofmt;
+    pthread_mutex_t record_mutex;       // 锁
+    int is_record;                      // 是否在录制
+    int record_error;  //虽然没用，但是代码中使用到了，所以别删
+
+    int videoindex;//视频输入流的下标
+    int audioindex;//音频输入流的下标
+
+    int videoindex_out;//视频输出流的下标
+    int audioindex_out;//音频输出流的下标
+
+    int record_count; //录制packet 数量，这个测试用的，虽然没用，但是代码中使用到了，所以别删
+    int is_first;     // 用于录制时候，当某一帧的 pts 和 dts 一致时，才开始录制
+//    int64_t start_pts;                  // 开始录制时pts
+//    int64_t start_dts;                  // 开始录制时dts
+    int64_t index; ///队列索引序号,从0开始
+    int64_t last_pts; ///视频帧最新的pts
 
     /* ffplay options specified by the user */
 #ifdef FFP_MERGE

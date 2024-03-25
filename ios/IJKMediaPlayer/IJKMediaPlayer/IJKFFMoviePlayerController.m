@@ -34,7 +34,7 @@
 #import "ijkioapplication.h"
 #include "string.h"
 
-static const char *kIJKFFRequiredFFmpegVersion = "ff4.0--ijk0.8.8--20210426--001";
+static const char *kIJKFFRequiredFFmpegVersion = "n6.1.1";
 
 // It means you didn't call shutdown if you found this object leaked.
 @interface IJKWeakHolder : NSObject
@@ -402,8 +402,8 @@ void IJKFFIOStatCompleteRegister(void (*cb)(const char *url,
         IJKWeakHolder *weakHolder = [IJKWeakHolder new];
         weakHolder.object = self;
 
-        ijkmp_set_weak_thiz(_mediaPlayer, (__bridge_retained void *) self);
-        ijkmp_set_inject_opaque(_mediaPlayer, (__bridge_retained void *) weakHolder);
+        ijkmp_set_weak_thiz(_mediaPlayer, (__bridge_retained void *)self);
+        ijkmp_set_inject_opaque(_mediaPlayer, (__bridge_retained void *)weakHolder);
         ijkmp_set_ijkio_inject_opaque(_mediaPlayer, (__bridge_retained void *)weakHolder);
         ijkmp_set_option_int(_mediaPlayer, IJKMP_OPT_CATEGORY_PLAYER, "start-on-prepared", _shouldAutoplay ? 1 : 0);
 
@@ -477,12 +477,11 @@ void IJKFFIOStatCompleteRegister(void (*cb)(const char *url,
 
 - (void)prepareToPlay
 {
-    [self prepareToPlay:NULL];
+    [self prepareToPlay:headerData];
 }
 
 - (void)prepareToPlay:(NSData *)data
 {
-    headerData = data;
     if (!_mediaPlayer)
         return;
 
@@ -494,12 +493,27 @@ void IJKFFIOStatCompleteRegister(void (*cb)(const char *url,
 
     _monitor.prepareStartTick = (int64_t)SDL_GetTickHR();
     ijkmp_master_clock(_mediaPlayer, 3);
-    ijkmp_prepare_async(_mediaPlayer, [headerData bytes], [headerData length]);
+    ijkmp_prepare_async(_mediaPlayer, (uint8_t *)[data bytes], (int)[data length]);
 }
 
 - (void)inputStreamData:(NSData *)data
 {
-    ijkmp_input_stream(_mediaPlayer, [data bytes], [data length]);
+    ijkmp_input_stream(_mediaPlayer, (char *)[data bytes], (int)[data length]);
+}
+
+- (void)startRecord:(NSString *)filePath
+{
+    ijkmp_start_record(_mediaPlayer, [filePath UTF8String]);
+}
+
+- (void)stopRecord
+{
+    ijkmp_stop_record(_mediaPlayer);
+}
+
+- (UIImage *)capture
+{
+    return [_glView snapshot];
 }
 
 - (void)setHudUrl:(NSString *)urlString
